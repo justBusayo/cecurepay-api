@@ -1,8 +1,15 @@
-# Fintech Auth Backend
+# Fintech Auth App
 
-This is the backend for the Fintech Auth App, a mobile application for financial transactions.
+A mobile application for financial transactions built with React Native, Express.js, MongoDB, and Paystack.
+
+## Project Structure
+
+- `/backend` - Express.js backend with MongoDB and Paystack integration
+- `/` - React Native mobile app
 
 ## Setup
 
-1. Install dependencies:
+### Backend
+
+1. Navigate to the backend directory:
 

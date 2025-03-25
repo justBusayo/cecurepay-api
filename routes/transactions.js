@@ -473,5 +473,72 @@ router.post(
   },
 )
 
-module.exports = router
+// @route   POST api/transactions/confirm-deposit
+// @desc    Confirm a deposit after Paystack payment
+// @access  Private
+router.post(
+  "/confirm-deposit",
+  [
+    auth,
+    check("reference", "Payment reference is required").not().isEmpty(),
+    check("amount", "Amount is required").isNumeric(),
+  ],
+  async (req, res) => {
+    const errors = validationResult(req)
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() })
+    }
 
+    const session = await mongoose.startSession()
+    session.startTransaction()
+
+    try {
+      const { reference, amount } = req.body
+
+      // Get user's profile
+      const user = await User.findById(req.user.id)
+      if (!user) {
+        await session.abortTransaction()
+        session.endSession()
+        return res.status(404).json({ message: "User not found" })
+      }
+
+      // Check if transaction already exists
+      const existingTransaction = await Transaction.findOne({ reference })
+      if (existingTransaction) {
+        await session.abortTransaction()
+        session.endSession()
+        return res.status(400).json({ message: "Transaction already processed" })
+      }
+
+      // Update user's balance
+      user.balance += Number.parseFloat(amount)
+      await user.save({ session })
+
+      // Create transaction record
+      const transaction = new Transaction({
+        userId: user._id,
+        transactionType: "deposit",
+        amount: Number.parseFloat(amount),
+        fee: 0,
+        status: "successful",
+        purpose: "Deposit via Paystack",
+        reference,
+      })
+
+      await transaction.save({ session })
+
+      await session.commitTransaction()
+      session.endSession()
+
+      res.json({ success: true, reference })
+    } catch (err) {
+      await session.abortTransaction()
+      session.endSession()
+      console.error(err.message)
+      res.status(500).send("Server error")
+    }
+  },
+)
+
+module.exports = router

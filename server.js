@@ -5,7 +5,7 @@ const mongoose = require("mongoose")
 const authRoutes = require("./routes/auth")
 const userRoutes = require("./routes/users")
 const transactionRoutes = require("./routes/transactions")
-const stripeRoutes = require("./routes/stripe")
+const paymentRoutes = require("./routes/payments")
 
 const app = express()
 
@@ -23,7 +23,7 @@ mongoose
 app.use("/api/auth", authRoutes)
 app.use("/api/users", userRoutes)
 app.use("/api/transactions", transactionRoutes)
-app.use("/api/stripe", stripeRoutes)
+app.use("/api/payments", paymentRoutes)
 
 // Health check route
 app.get("/health", (req, res) => {
@@ -32,4 +32,3 @@ app.get("/health", (req, res) => {
 
 const PORT = process.env.PORT || 5000
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`))
-
