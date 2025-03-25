@@ -20,7 +20,7 @@ router.post(
   async (req, res) => {
     const errors = validationResult(req)
     if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() })
+      return res.status(400).json({ success: false, message: "Validation error", errors: errors.array() })
     }
 
     const { firstName, lastName, email, password, phoneNumber } = req.body
@@ -29,12 +29,12 @@ router.post(
       // Check if user already exists
       let user = await User.findOne({ email })
       if (user) {
-        return res.status(400).json({ message: "User already exists with this email" })
+        return res.status(400).json({ success: false, message: "User already exists with this email" })
       }
 
       user = await User.findOne({ phoneNumber })
       if (user) {
-        return res.status(400).json({ message: "User already exists with this phone number" })
+        return res.status(400).json({ success: false, message: "User already exists with this phone number" })
       }
 
       // Create new user
@@ -58,12 +58,15 @@ router.post(
 
       // Sign token
       jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "7d" }, (err, token) => {
-        if (err) throw err
-        res.json({ token })
+        if (err) {
+          console.error("JWT Sign Error:", err)
+          throw err
+        }
+        res.json({ success: true, token })
       })
     } catch (err) {
-      console.error(err.message)
-      res.status(500).send("Server error")
+      console.error("Registration error:", err.message)
+      res.status(500).json({ success: false, message: "Server error during registration", error: err.message })
     }
   },
 )
@@ -77,7 +80,7 @@ router.post(
   async (req, res) => {
     const errors = validationResult(req)
     if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() })
+      return res.status(400).json({ success: false, message: "Validation error", errors: errors.array() })
     }
 
     const { email, password } = req.body
@@ -86,13 +89,13 @@ router.post(
       // Check if user exists
       const user = await User.findOne({ email })
       if (!user) {
-        return res.status(400).json({ message: "Invalid credentials" })
+        return res.status(400).json({ success: false, message: "Invalid credentials" })
       }
 
       // Check password
       const isMatch = await user.comparePassword(password)
       if (!isMatch) {
-        return res.status(400).json({ message: "Invalid credentials" })
+        return res.status(400).json({ success: false, message: "Invalid credentials" })
       }
 
       // Create JWT payload
@@ -104,12 +107,24 @@ router.post(
 
       // Sign token
       jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "7d" }, (err, token) => {
-        if (err) throw err
-        res.json({ token })
+        if (err) {
+          console.error("JWT Sign Error:", err)
+          throw err
+        }
+        res.json({
+          success: true,
+          token,
+          user: {
+            id: user.id,
+            email: user.email,
+            firstName: user.firstName,
+            lastName: user.lastName,
+          },
+        })
       })
     } catch (err) {
-      console.error(err.message)
-      res.status(500).send("Server error")
+      console.error("Login error:", err.message)
+      res.status(500).json({ success: false, message: "Server error during login", error: err.message })
     }
   },
 )
@@ -126,7 +141,7 @@ router.post(
   async (req, res) => {
     const errors = validationResult(req)
     if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() })
+      return res.status(400).json({ success: false, message: "Validation error", errors: errors.array() })
     }
 
     const { phoneNumber, password } = req.body
@@ -135,13 +150,13 @@ router.post(
       // Check if user exists
       const user = await User.findOne({ phoneNumber })
       if (!user) {
-        return res.status(400).json({ message: "User not found with this phone number" })
+        return res.status(400).json({ success: false, message: "User not found with this phone number" })
       }
 
       // Check password
       const isMatch = await user.comparePassword(password)
       if (!isMatch) {
-        return res.status(400).json({ message: "Invalid credentials" })
+        return res.status(400).json({ success: false, message: "Invalid credentials" })
       }
 
       // Create JWT payload
@@ -153,12 +168,24 @@ router.post(
 
       // Sign token
       jwt.sign(payload, process.env.JWT_SECRET, { expiresIn: "7d" }, (err, token) => {
-        if (err) throw err
-        res.json({ token })
+        if (err) {
+          console.error("JWT Sign Error:", err)
+          throw err
+        }
+        res.json({
+          success: true,
+          token,
+          user: {
+            id: user.id,
+            email: user.email,
+            firstName: user.firstName,
+            lastName: user.lastName,
+          },
+        })
       })
     } catch (err) {
-      console.error(err.message)
-      res.status(500).send("Server error")
+      console.error("Login with phone error:", err.message)
+      res.status(500).json({ success: false, message: "Server error during phone login", error: err.message })
     }
   },
 )
@@ -170,14 +197,13 @@ router.get("/me", auth, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select("-password")
     if (!user) {
-      return res.status(404).json({ message: "User not found" })
+      return res.status(404).json({ success: false, message: "User not found" })
     }
-    res.json(user)
+    res.json({ success: true, user })
   } catch (err) {
-    console.error(err.message)
-    res.status(500).send("Server error")
+    console.error("Get current user error:", err.message)
+    res.status(500).json({ success: false, message: "Server error getting user profile", error: err.message })
   }
 })
 
 module.exports = router
-

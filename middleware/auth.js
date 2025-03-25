@@ -6,7 +6,7 @@ module.exports = (req, res, next) => {
 
   // Check if no token
   if (!token) {
-    return res.status(401).json({ message: "No token, authorization denied" })
+    return res.status(401).json({ success: false, message: "No authentication token, authorization denied" })
   }
 
   // Verify token
@@ -15,7 +15,10 @@ module.exports = (req, res, next) => {
     req.user = decoded.user
     next()
   } catch (err) {
-    res.status(401).json({ message: "Token is not valid" })
+    console.error("Token verification error:", err.message)
+    if (err.name === "TokenExpiredError") {
+      return res.status(401).json({ success: false, message: "Token has expired, please login again" })
+    }
+    res.status(401).json({ success: false, message: "Token is not valid" })
   }
 }
-
