@@ -1,6 +1,7 @@
 const express = require("express")
 const router = express.Router()
 const axios = require("axios")
+const crypto = require("crypto")
 const auth = require("../middleware/auth")
 const User = require("../models/User")
 const Transaction = require("../models/Transaction")
@@ -58,7 +59,7 @@ router.post("/initialize", auth, async (req, res) => {
       amount,
       email,
       metadata: enhancedMetadata,
-      callback_url: process.env.PAYSTACK_CALLBACK_URL || "https://your-app.com/payment-callback",
+      callback_url: `${process.env.API_BASE_URL}/api/payments/callback`, // Use our API endpoint
     }
 
     const response = await paystackRequest("/transaction/initialize", "POST", paymentData)
@@ -67,6 +68,65 @@ router.post("/initialize", auth, async (req, res) => {
   } catch (err) {
     console.error("Payment initialization error:", err.message)
     res.status(500).json({ message: "Server error" })
+  }
+})
+
+// @route   GET api/payments/callback
+// @desc    Handle Paystack payment callback
+// @access  Public
+router.get("/callback", async (req, res) => {
+  try {
+    const { reference } = req.query
+
+    if (!reference) {
+      return res.status(400).json({ message: "Payment reference is required" })
+    }
+
+    // Verify the transaction with Paystack
+    const paystackResponse = await paystackRequest(`/transaction/verify/${reference}`)
+
+    if (paystackResponse.data.status === "success") {
+      // Extract data from Paystack response
+      const { amount, metadata } = paystackResponse.data
+      const userId = metadata.userId
+      const amountInNaira = amount / 100 // Convert from kobo to Naira
+
+      // Find the user
+      const user = await User.findById(userId)
+      if (!user) {
+        return res.status(404).json({ message: "User not found" })
+      }
+
+      // Check if transaction already exists
+      const existingTransaction = await Transaction.findOne({ reference })
+      if (!existingTransaction) {
+        // Update user's balance
+        user.balance += amountInNaira
+        await user.save()
+
+        // Create transaction record
+        const transaction = new Transaction({
+          userId,
+          transactionType: "deposit",
+          amount: amountInNaira,
+          fee: 0,
+          status: "successful",
+          purpose: "Deposit via Paystack",
+          reference,
+        })
+
+        await transaction.save()
+      }
+
+      // Redirect to success page in the app
+      return res.redirect(`${process.env.APP_URL}/deposit-success?reference=${reference}&amount=${amountInNaira}`)
+    } else {
+      // Redirect to failure page in the app
+      return res.redirect(`${process.env.APP_URL}/deposit-failed?reference=${reference}`)
+    }
+  } catch (err) {
+    console.error("Payment callback error:", err.message)
+    return res.redirect(`${process.env.APP_URL}/deposit-failed?error=server_error`)
   }
 })
 
@@ -147,6 +207,13 @@ const handleSuccessfulPayment = async (data) => {
       return
     }
 
+    // Check if transaction already exists
+    const existingTransaction = await Transaction.findOne({ reference })
+    if (existingTransaction) {
+      console.log("Transaction already processed:", reference)
+      return
+    }
+
     // Update user's balance
     user.balance += amountInNaira
     await user.save()
@@ -172,7 +239,7 @@ const handleSuccessfulPayment = async (data) => {
 // Helper function to handle successful transfers
 const handleSuccessfulTransfer = async (data) => {
   try {
-    const { reference, amount, metadata } = data
+    const { reference, metadata } = data
 
     if (!metadata || !metadata.userId) {
       console.error("No user ID in metadata")
@@ -189,4 +256,3 @@ const handleSuccessfulTransfer = async (data) => {
 }
 
 module.exports = router
-

@@ -36,12 +36,6 @@ const UserSchema = new mongoose.Schema({
     type: String,
     unique: true,
   },
-  stripeCustomerId: {
-    type: String,
-  },
-  stripeConnectId: {
-    type: String,
-  },
   isVerified: {
     type: Boolean,
     default: false,

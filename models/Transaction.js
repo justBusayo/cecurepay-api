@@ -48,9 +48,6 @@ const TransactionSchema = new mongoose.Schema({
     required: true,
     unique: true,
   },
-  stripePaymentIntentId: {
-    type: String,
-  },
   createdAt: {
     type: Date,
     default: Date.now,
@@ -58,4 +55,3 @@ const TransactionSchema = new mongoose.Schema({
 })
 
 module.exports = mongoose.model("Transaction", TransactionSchema)
-
