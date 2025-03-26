@@ -43,6 +43,18 @@ const UserSchema = new mongoose.Schema({
   paystackCustomerCode: {
     type: String,
   },
+  paystackSubaccountCode: {
+    type: String,
+  },
+  paystackVirtualAccountNumber: {
+    type: String,
+  },
+  paystackVirtualBankName: {
+    type: String,
+  },
+  paystackTransferRecipientCode: {
+    type: String,
+  },
   createdAt: {
     type: Date,
     default: Date.now,

@@ -118,6 +118,8 @@ router.post("/initialize-card-tokenization", auth, async (req, res) => {
   }
 })
 
+// Update the verify-card-tokenization endpoint with better error handling
+
 // @route   POST api/payments/verify-card-tokenization
 // @desc    Verify and save a tokenized card
 // @access  Private
@@ -129,17 +131,35 @@ router.post("/verify-card-tokenization", auth, async (req, res) => {
       return res.status(400).json({ success: false, message: "Reference is required" })
     }
 
+    console.log(`Verifying card tokenization for reference: ${reference}`)
+
     // Verify the transaction with Paystack
-    const verifyResponse = await paystackRequest(`/transaction/verify/${reference}`)
+    let verifyResponse
+    try {
+      verifyResponse = await paystackRequest(`/transaction/verify/${reference}`)
+      console.log("Paystack verification response:", JSON.stringify(verifyResponse))
+    } catch (paystackError) {
+      console.error("Paystack verification error:", paystackError)
+      return res.status(400).json({
+        success: false,
+        message: `Paystack verification failed: ${paystackError.message}`,
+      })
+    }
 
     if (!verifyResponse.status || verifyResponse.data.status !== "success") {
-      return res.status(400).json({ success: false, message: "Card verification failed" })
+      return res.status(400).json({
+        success: false,
+        message: "Card verification failed: Transaction not successful",
+      })
     }
 
     // Get authorization data
     const authData = verifyResponse.data.authorization
     if (!authData || !authData.authorization_code) {
-      return res.status(400).json({ success: false, message: "No card authorization data found" })
+      return res.status(400).json({
+        success: false,
+        message: "No card authorization data found in Paystack response",
+      })
     }
 
     // Get user
@@ -153,22 +173,30 @@ router.post("/verify-card-tokenization", auth, async (req, res) => {
 
     // If not, create a customer in Paystack
     if (!customerCode) {
-      const customerData = {
-        email: verifyResponse.data.customer.email,
-        first_name: user.firstName,
-        last_name: user.lastName,
-        phone: user.phoneNumber,
-        metadata: {
-          userId: user._id.toString(),
-        },
+      try {
+        const customerData = {
+          email: verifyResponse.data.customer.email,
+          first_name: user.firstName,
+          last_name: user.lastName,
+          phone: user.phoneNumber,
+          metadata: {
+            userId: user._id.toString(),
+          },
+        }
+
+        const customerResponse = await paystackRequest("/customer", "POST", customerData)
+        customerCode = customerResponse.data.customer_code
+
+        // Save customer code to user
+        user.paystackCustomerCode = customerCode
+        await user.save()
+      } catch (customerError) {
+        console.error("Customer creation error:", customerError)
+        return res.status(400).json({
+          success: false,
+          message: `Failed to create customer: ${customerError.message}`,
+        })
       }
-
-      const customerResponse = await paystackRequest("/customer", "POST", customerData)
-      customerCode = customerResponse.data.customer_code
-
-      // Save customer code to user
-      user.paystackCustomerCode = customerCode
-      await user.save()
     }
 
     // If this card is set as primary, update all other cards
@@ -189,44 +217,58 @@ router.post("/verify-card-tokenization", auth, async (req, res) => {
     }
 
     // Create new card
-    const card = new Card({
-      userId: req.user.id,
-      last4: authData.last4,
-      cardType: authData.card_type,
-      expiryMonth: authData.exp_month,
-      expiryYear: authData.exp_year,
-      bin: authData.bin,
-      bank: authData.bank,
-      cardHolder: user.firstName + " " + user.lastName, // Use user's name as card holder
-      paystackAuthCode: authData.authorization_code,
-      paystackCustomerCode: customerCode,
-      isPrimary: isPrimary || false,
-    })
+    try {
+      const card = new Card({
+        userId: req.user.id,
+        last4: authData.last4,
+        cardType: authData.card_type,
+        expiryMonth: authData.exp_month,
+        expiryYear: authData.exp_year,
+        bin: authData.bin,
+        bank: authData.bank,
+        cardHolder: user.firstName + " " + user.lastName, // Use user's name as card holder
+        paystackAuthCode: authData.authorization_code,
+        paystackCustomerCode: customerCode,
+        isPrimary: isPrimary || false,
+      })
 
-    await card.save()
+      await card.save()
+      console.log("Card saved successfully:", card._id)
 
-    // Refund the charge
-    const refundData = {
-      transaction: verifyResponse.data.id,
+      // Refund the charge
+      try {
+        const refundData = {
+          transaction: verifyResponse.data.id,
+        }
+
+        await paystackRequest("/refund", "POST", refundData)
+      } catch (refundError) {
+        console.error("Refund error:", refundError)
+        // Continue even if refund fails
+      }
+
+      // Format card for response
+      const formattedCard = {
+        id: card._id,
+        card_number: `**** **** **** ${card.last4}`,
+        card_holder: card.cardHolder,
+        expiry_date: `${card.expiryMonth}/${card.expiryYear.slice(-2)}`,
+        card_type: card.cardType,
+        is_primary: card.isPrimary,
+        bank: card.bank,
+      }
+
+      res.json({ success: true, card: formattedCard })
+    } catch (cardError) {
+      console.error("Card creation error:", cardError)
+      return res.status(500).json({
+        success: false,
+        message: `Failed to save card: ${cardError.message}`,
+      })
     }
-
-    await paystackRequest("/refund", "POST", refundData)
-
-    // Format card for response
-    const formattedCard = {
-      id: card._id,
-      card_number: `**** **** **** ${card.last4}`,
-      card_holder: card.cardHolder,
-      expiry_date: `${card.expiryMonth}/${card.expiryYear.slice(-2)}`,
-      card_type: card.cardType,
-      is_primary: card.isPrimary,
-      bank: card.bank,
-    }
-
-    res.json({ success: true, card: formattedCard })
   } catch (err) {
-    console.error("Card verification error:", err.message)
-    res.status(500).json({ success: false, message: "Server error" })
+    console.error("Card verification error:", err)
+    res.status(500).json({ success: false, message: `Server error: ${err.message}` })
   }
 })
 
@@ -411,6 +453,12 @@ router.post("/webhook", express.raw({ type: "application/json" }), async (req, r
       case "transfer.success":
         await handleSuccessfulTransfer(event.data)
         break
+      case "transfer.failed":
+        await handleFailedTransfer(event.data)
+        break
+      case "transfer.reversed":
+        await handleReversedTransfer(event.data)
+        break
       default:
         console.log(`Unhandled event type: ${event.event}`)
     }
@@ -487,6 +535,328 @@ const handleSuccessfulTransfer = async (data) => {
     console.log("Transfer processed successfully:", reference)
   } catch (error) {
     console.error("Error handling successful transfer:", error)
+  }
+}
+
+// @route   POST api/payments/create-subaccount
+// @desc    Create a Paystack subaccount for a user
+// @access  Private
+router.post("/create-subaccount", auth, async (req, res) => {
+  try {
+    const { businessName, settlementBank, accountNumber, percentageCharge = 0 } = req.body
+
+    if (!businessName || !settlementBank || !accountNumber) {
+      return res.status(400).json({
+        success: false,
+        message: "Business name, settlement bank, and account number are required",
+      })
+    }
+
+    // Get user
+    const user = await User.findById(req.user.id)
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" })
+    }
+
+    // Check if user already has a subaccount
+    if (user.paystackSubaccountCode) {
+      return res.status(400).json({
+        success: false,
+        message: "User already has a subaccount",
+      })
+    }
+
+    // Create subaccount with Paystack
+    const subaccountData = {
+      business_name: businessName,
+      settlement_bank: settlementBank,
+      account_number: accountNumber,
+      percentage_charge: percentageCharge,
+      description: `Subaccount for ${user.firstName} ${user.lastName}`,
+    }
+
+    const response = await paystackRequest("/subaccount", "POST", subaccountData)
+
+    if (!response.status) {
+      return res.status(400).json({
+        success: false,
+        message: "Failed to create subaccount",
+      })
+    }
+
+    // Save subaccount code to user
+    user.paystackSubaccountCode = response.data.subaccount_code
+    await user.save()
+
+    res.json({
+      success: true,
+      subaccount: {
+        code: response.data.subaccount_code,
+        businessName: response.data.business_name,
+        settlementBank: response.data.settlement_bank,
+        accountNumber: response.data.account_number,
+      },
+    })
+  } catch (err) {
+    console.error("Create subaccount error:", err.message)
+    res.status(500).json({ success: false, message: "Server error" })
+  }
+})
+
+// @route   POST api/payments/create-virtual-account
+// @desc    Create a dedicated virtual account for a user
+// @access  Private
+router.post("/create-virtual-account", auth, async (req, res) => {
+  try {
+    // Get user
+    const user = await User.findById(req.user.id)
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" })
+    }
+
+    // Check if user already has a virtual account
+    if (user.paystackVirtualAccountNumber) {
+      return res.status(400).json({
+        success: false,
+        message: "User already has a virtual account",
+      })
+    }
+
+    // Create a customer if not exists
+    let customerCode = user.paystackCustomerCode
+    if (!customerCode) {
+      const customerData = {
+        email: user.email,
+        first_name: user.firstName,
+        last_name: user.lastName,
+        phone: user.phoneNumber,
+        metadata: {
+          userId: user._id.toString(),
+        },
+      }
+
+      const customerResponse = await paystackRequest("/customer", "POST", customerData)
+      customerCode = customerResponse.data.customer_code
+
+      // Save customer code to user
+      user.paystackCustomerCode = customerCode
+      await user.save()
+    }
+
+    // Create dedicated virtual account
+    const virtualAccountData = {
+      customer: customerCode,
+      preferred_bank: "test-bank", // Replace with actual preferred bank
+    }
+
+    const response = await paystackRequest("/dedicated_account", "POST", virtualAccountData)
+
+    if (!response.status) {
+      return res.status(400).json({
+        success: false,
+        message: "Failed to create virtual account",
+      })
+    }
+
+    // Save virtual account details to user
+    user.paystackVirtualAccountNumber = response.data.account_number
+    user.paystackVirtualBankName = response.data.bank.name
+    await user.save()
+
+    res.json({
+      success: true,
+      virtualAccount: {
+        accountNumber: response.data.account_number,
+        bankName: response.data.bank.name,
+        accountName: response.data.account_name,
+      },
+    })
+  } catch (err) {
+    console.error("Create virtual account error:", err.message)
+    res.status(500).json({ success: false, message: "Server error" })
+  }
+})
+
+// @route   POST api/payments/transfer
+// @desc    Transfer funds between users
+// @access  Private
+router.post("/transfer", auth, async (req, res) => {
+  try {
+    const { recipientId, amount, reason } = req.body
+
+    if (!recipientId || !amount || amount <= 0) {
+      return res.status(400).json({
+        success: false,
+        message: "Recipient ID and valid amount are required",
+      })
+    }
+
+    // Get sender
+    const sender = await User.findById(req.user.id)
+    if (!sender) {
+      return res.status(404).json({ success: false, message: "Sender not found" })
+    }
+
+    // Check if sender has enough balance
+    if (sender.balance < amount) {
+      return res.status(400).json({
+        success: false,
+        message: "Insufficient balance",
+      })
+    }
+
+    // Get recipient
+    const recipient = await User.findById(recipientId)
+    if (!recipient) {
+      return res.status(404).json({ success: false, message: "Recipient not found" })
+    }
+
+    // Create a transfer recipient if not exists
+    let recipientCode = recipient.paystackTransferRecipientCode
+    if (!recipientCode) {
+      const recipientData = {
+        type: "nuban",
+        name: `${recipient.firstName} ${recipient.lastName}`,
+        account_number: recipient.paystackVirtualAccountNumber || "0000000000",
+        bank_code: "044", // Access Bank code, replace with actual bank code
+        currency: "NGN",
+      }
+
+      const recipientResponse = await paystackRequest("/transferrecipient", "POST", recipientData)
+      recipientCode = recipientResponse.data.recipient_code
+
+      // Save recipient code to user
+      recipient.paystackTransferRecipientCode = recipientCode
+      await recipient.save()
+    }
+
+    // Create a transfer
+    const transferData = {
+      source: "balance",
+      amount: amount * 100, // Convert to kobo
+      recipient: recipientCode,
+      reason: reason || "Transfer",
+    }
+
+    const transferResponse = await paystackRequest("/transfer", "POST", transferData)
+
+    if (!transferResponse.status) {
+      return res.status(400).json({
+        success: false,
+        message: "Failed to initiate transfer",
+      })
+    }
+
+    // Update balances
+    sender.balance -= amount
+    recipient.balance += amount
+    await sender.save()
+    await recipient.save()
+
+    // Create transaction records
+    const reference = transferResponse.data.transfer_code
+
+    const senderTransaction = new Transaction({
+      userId: sender._id,
+      transactionType: "send",
+      amount: amount,
+      fee: 0,
+      status: "successful",
+      recipientId: recipient._id,
+      recipientName: `${recipient.firstName} ${recipient.lastName}`,
+      purpose: reason || "Transfer",
+      reference,
+    })
+
+    const recipientTransaction = new Transaction({
+      userId: recipient._id,
+      transactionType: "receive",
+      amount: amount,
+      fee: 0,
+      status: "successful",
+      recipientId: sender._id,
+      recipientName: `${sender.firstName} ${sender.lastName}`,
+      purpose: reason || "Transfer",
+      reference: `${reference}-RCV`,
+    })
+
+    await senderTransaction.save()
+    await recipientTransaction.save()
+
+    res.json({
+      success: true,
+      reference,
+      transferCode: transferResponse.data.transfer_code,
+    })
+  } catch (err) {
+    console.error("Transfer error:", err.message)
+    res.status(500).json({ success: false, message: "Server error" })
+  }
+})
+
+const handleFailedTransfer = async (data) => {
+  try {
+    const { reference, recipient, reason } = data
+
+    // Find the transaction
+    const transaction = await Transaction.findOne({ reference })
+    if (!transaction) {
+      console.error("Transaction not found for failed transfer:", reference)
+      return
+    }
+
+    // Update transaction status
+    transaction.status = "failed"
+    transaction.notes = reason || "Transfer failed"
+    await transaction.save()
+
+    // Refund the sender
+    const sender = await User.findById(transaction.userId)
+    if (sender) {
+      sender.balance += transaction.amount
+      await sender.save()
+    }
+
+    console.log("Failed transfer handled:", reference)
+  } catch (error) {
+    console.error("Error handling failed transfer:", error)
+  }
+}
+
+const handleReversedTransfer = async (data) => {
+  try {
+    const { reference, recipient } = data
+
+    // Find the transaction
+    const transaction = await Transaction.findOne({ reference })
+    if (!transaction) {
+      console.error("Transaction not found for reversed transfer:", reference)
+      return
+    }
+
+    // Update transaction status
+    transaction.status = "reversed"
+    await transaction.save()
+
+    // Refund the sender
+    const sender = await User.findById(transaction.userId)
+    if (sender) {
+      sender.balance += transaction.amount
+      await sender.save()
+    }
+
+    // Deduct from recipient
+    if (transaction.recipientId) {
+      const recipient = await User.findById(transaction.recipientId)
+      if (recipient) {
+        recipient.balance -= transaction.amount
+        await recipient.save()
+      }
+    }
+
+    console.log("Reversed transfer handled:", reference)
+  } catch (error) {
+    console.error("Error handling reversed transfer:", error)
   }
 }
 
