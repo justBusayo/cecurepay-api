@@ -40,6 +40,9 @@ const UserSchema = new mongoose.Schema({
     type: Boolean,
     default: false,
   },
+  paystackCustomerCode: {
+    type: String,
+  },
   createdAt: {
     type: Date,
     default: Date.now,
@@ -80,4 +83,3 @@ UserSchema.methods.comparePassword = async function (candidatePassword) {
 }
 
 module.exports = mongoose.model("User", UserSchema)
-

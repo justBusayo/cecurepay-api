@@ -4,6 +4,7 @@ const axios = require("axios")
 const crypto = require("crypto")
 const auth = require("../middleware/auth")
 const User = require("../models/User")
+const Card = require("../models/Card")
 const Transaction = require("../models/Transaction")
 
 // Paystack API base URL
@@ -68,6 +69,82 @@ router.post("/initialize", auth, async (req, res) => {
   } catch (err) {
     console.error("Payment initialization error:", err.message)
     res.status(500).json({ message: "Server error" })
+  }
+})
+
+// @route   POST api/payments/charge-card
+// @desc    Charge a saved card
+// @access  Private
+router.post("/charge-card", auth, async (req, res) => {
+  try {
+    const { amount, email, cardId } = req.body
+
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ success: false, message: "Valid amount is required" })
+    }
+
+    if (!email) {
+      return res.status(400).json({ success: false, message: "Email is required" })
+    }
+
+    if (!cardId) {
+      return res.status(400).json({ success: false, message: "Card ID is required" })
+    }
+
+    // Find the card
+    const card = await Card.findOne({ _id: cardId, userId: req.user.id, isActive: true })
+    if (!card) {
+      return res.status(404).json({ success: false, message: "Card not found" })
+    }
+
+    // Charge the card using Paystack
+    const chargeData = {
+      authorization_code: card.paystackAuthCode,
+      email,
+      amount: amount * 100, // Convert to kobo
+      metadata: {
+        userId: req.user.id,
+        cardId: card._id.toString(),
+      },
+    }
+
+    const chargeResponse = await paystackRequest("/transaction/charge_authorization", "POST", chargeData)
+
+    if (chargeResponse.status !== true) {
+      return res.status(400).json({ success: false, message: "Payment failed" })
+    }
+
+    // Get user
+    const user = await User.findById(req.user.id)
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" })
+    }
+
+    // Update user's balance
+    user.balance += Number.parseFloat(amount)
+    await user.save()
+
+    // Create transaction record
+    const transaction = new Transaction({
+      userId: user._id,
+      transactionType: "deposit",
+      amount: Number.parseFloat(amount),
+      fee: 0,
+      status: "successful",
+      purpose: "Deposit via saved card",
+      reference: chargeResponse.data.reference,
+    })
+
+    await transaction.save()
+
+    res.json({
+      success: true,
+      reference: chargeResponse.data.reference,
+      status: chargeResponse.data.status,
+    })
+  } catch (err) {
+    console.error("Charge card error:", err.message)
+    res.status(500).json({ success: false, message: "Server error" })
   }
 })
 

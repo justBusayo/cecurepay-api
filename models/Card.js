@@ -6,19 +6,37 @@ const CardSchema = new mongoose.Schema({
     ref: "User",
     required: true,
   },
-  cardNumber: {
+  last4: {
     type: String,
     required: true,
+  },
+  cardType: {
+    type: String,
+    required: true,
+  },
+  expiryMonth: {
+    type: String,
+    required: true,
+  },
+  expiryYear: {
+    type: String,
+    required: true,
+  },
+  bin: {
+    type: String,
+  },
+  bank: {
+    type: String,
   },
   cardHolder: {
     type: String,
     required: true,
   },
-  expiryDate: {
+  paystackAuthCode: {
     type: String,
     required: true,
   },
-  cardType: {
+  paystackCustomerCode: {
     type: String,
     required: true,
   },
@@ -36,14 +54,4 @@ const CardSchema = new mongoose.Schema({
   },
 })
 
-// Only store last 4 digits of card number for security
-CardSchema.pre("save", function (next) {
-  if (this.isModified("cardNumber")) {
-    // Store only last 4 digits
-    this.cardNumber = this.cardNumber.slice(-4).padStart(16, "*")
-  }
-  next()
-})
-
 module.exports = mongoose.model("Card", CardSchema)
-

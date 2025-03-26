@@ -6,6 +6,34 @@ const TransactionPin = require("../models/TransactionPin")
 const Card = require("../models/Card")
 const Beneficiary = require("../models/Beneficiary")
 const auth = require("../middleware/auth")
+const axios = require("axios")
+
+// Paystack API base URL
+const PAYSTACK_BASE_URL = "https://api.paystack.co"
+
+// Helper function to make Paystack API requests
+const paystackRequest = async (endpoint, method = "GET", data = null) => {
+  try {
+    const config = {
+      method,
+      url: `${PAYSTACK_BASE_URL}${endpoint}`,
+      headers: {
+        Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+        "Content-Type": "application/json",
+      },
+    }
+
+    if (data && (method === "POST" || method === "PUT")) {
+      config.data = data
+    }
+
+    const response = await axios(config)
+    return response.data
+  } catch (error) {
+    console.error("Paystack API error:", error.response ? error.response.data : error.message)
+    throw new Error(error.response ? error.response.data.message : error.message)
+  }
+}
 
 // @route   GET api/users/search
 // @desc    Search users by cecureTag or name
@@ -114,7 +142,20 @@ router.post("/verify-pin", [auth, check("pin", "PIN is required").isLength({ min
 router.get("/cards", auth, async (req, res) => {
   try {
     const cards = await Card.find({ userId: req.user.id, isActive: true })
-    res.json(cards)
+
+    // Format card data for frontend
+    const formattedCards = cards.map((card) => ({
+      id: card._id,
+      card_number: `**** **** **** ${card.last4}`,
+      card_holder: card.cardHolder,
+      expiry_date: `${card.expiryMonth}/${card.expiryYear.slice(-2)}`,
+      card_type: card.cardType,
+      is_primary: card.isPrimary,
+      bank: card.bank,
+      auth_code: card.paystackAuthCode,
+    }))
+
+    res.json(formattedCards)
   } catch (err) {
     console.error(err.message)
     res.status(500).send("Server error")
@@ -122,17 +163,11 @@ router.get("/cards", auth, async (req, res) => {
 })
 
 // @route   POST api/users/cards
-// @desc    Add a card
+// @desc    Add a card via Paystack tokenization
 // @access  Private
 router.post(
   "/cards",
-  [
-    auth,
-    check("cardNumber", "Card number is required").isLength({ min: 16, max: 16 }),
-    check("cardHolder", "Card holder name is required").not().isEmpty(),
-    check("expiryDate", "Expiry date is required").matches(/^(0[1-9]|1[0-2])\/\d{2}$/),
-    check("cardType", "Card type is required").not().isEmpty(),
-  ],
+  [auth, check("token", "Paystack token is required").not().isEmpty(), check("email", "Email is required").isEmail()],
   async (req, res) => {
     const errors = validationResult(req)
     if (!errors.isEmpty()) {
@@ -140,25 +175,105 @@ router.post(
     }
 
     try {
-      const { cardNumber, cardHolder, expiryDate, cardType, isPrimary } = req.body
+      const { token, email, isPrimary } = req.body
+      const user = await User.findById(req.user.id)
+
+      if (!user) {
+        return res.status(404).json({ message: "User not found" })
+      }
+
+      // Check if user already has a Paystack customer code
+      let customerCode = user.paystackCustomerCode
+
+      // If not, create a customer in Paystack
+      if (!customerCode) {
+        const customerData = {
+          email: email,
+          first_name: user.firstName,
+          last_name: user.lastName,
+          phone: user.phoneNumber,
+          metadata: {
+            userId: user._id.toString(),
+          },
+        }
+
+        const customerResponse = await paystackRequest("/customer", "POST", customerData)
+        customerCode = customerResponse.data.customer_code
+
+        // Save customer code to user
+        user.paystackCustomerCode = customerCode
+        await user.save()
+      }
+
+      // Charge the card to tokenize it
+      const chargeData = {
+        email: email,
+        amount: 50, // Charge a small amount (50 kobo) that will be refunded
+        card: { token },
+      }
+
+      const chargeResponse = await paystackRequest("/transaction/charge_authorization", "POST", chargeData)
+
+      if (chargeResponse.status !== true || chargeResponse.data.status !== "success") {
+        return res.status(400).json({ message: "Card validation failed" })
+      }
+
+      // Extract card details from response
+      const cardData = chargeResponse.data.authorization
 
       // If this card is set as primary, update all other cards
       if (isPrimary) {
         await Card.updateMany({ userId: req.user.id }, { $set: { isPrimary: false } })
       }
 
+      // Check if card already exists
+      const existingCard = await Card.findOne({
+        userId: req.user.id,
+        last4: cardData.last4,
+        bin: cardData.bin,
+        paystackAuthCode: cardData.authorization_code,
+      })
+
+      if (existingCard) {
+        return res.status(400).json({ message: "This card is already saved to your account" })
+      }
+
       // Create new card
       const card = new Card({
         userId: req.user.id,
-        cardNumber,
-        cardHolder,
-        expiryDate,
-        cardType,
+        last4: cardData.last4,
+        cardType: cardData.card_type,
+        expiryMonth: cardData.exp_month,
+        expiryYear: cardData.exp_year,
+        bin: cardData.bin,
+        bank: cardData.bank,
+        cardHolder: user.firstName + " " + user.lastName, // Use user's name as card holder
+        paystackAuthCode: cardData.authorization_code,
+        paystackCustomerCode: customerCode,
         isPrimary: isPrimary || false,
       })
 
       await card.save()
-      res.json(card)
+
+      // Refund the charge
+      const refundData = {
+        transaction: chargeResponse.data.id,
+      }
+
+      await paystackRequest("/refund", "POST", refundData)
+
+      // Format card for response
+      const formattedCard = {
+        id: card._id,
+        card_number: `**** **** **** ${card.last4}`,
+        card_holder: card.cardHolder,
+        expiry_date: `${card.expiryMonth}/${card.expiryYear.slice(-2)}`,
+        card_type: card.cardType,
+        is_primary: card.isPrimary,
+        bank: card.bank,
+      }
+
+      res.json(formattedCard)
     } catch (err) {
       console.error(err.message)
       res.status(500).send("Server error")
@@ -201,4 +316,3 @@ router.get("/beneficiaries", auth, async (req, res) => {
 })
 
 module.exports = router
-
