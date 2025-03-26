@@ -72,6 +72,164 @@ router.post("/initialize", auth, async (req, res) => {
   }
 })
 
+// @route   POST api/payments/initialize-card-tokenization
+// @desc    Initialize a card tokenization process
+// @access  Private
+router.post("/initialize-card-tokenization", auth, async (req, res) => {
+  try {
+    const { email } = req.body
+
+    if (!email) {
+      return res.status(400).json({ success: false, message: "Email is required" })
+    }
+
+    // Get user
+    const user = await User.findById(req.user.id)
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" })
+    }
+
+    // Initialize a minimal charge to tokenize the card
+    const paymentData = {
+      amount: 50, // Minimum amount (50 kobo)
+      email,
+      metadata: {
+        userId: req.user.id,
+        purpose: "card_tokenization",
+      },
+      channels: ["card"],
+    }
+
+    const response = await paystackRequest("/transaction/initialize", "POST", paymentData)
+
+    if (!response.status) {
+      return res.status(400).json({ success: false, message: "Failed to initialize card tokenization" })
+    }
+
+    res.json({
+      success: true,
+      authorization_url: response.data.authorization_url,
+      access_code: response.data.access_code,
+      reference: response.data.reference,
+    })
+  } catch (err) {
+    console.error("Card tokenization initialization error:", err.message)
+    res.status(500).json({ success: false, message: "Server error" })
+  }
+})
+
+// @route   POST api/payments/verify-card-tokenization
+// @desc    Verify and save a tokenized card
+// @access  Private
+router.post("/verify-card-tokenization", auth, async (req, res) => {
+  try {
+    const { reference, isPrimary = false } = req.body
+
+    if (!reference) {
+      return res.status(400).json({ success: false, message: "Reference is required" })
+    }
+
+    // Verify the transaction with Paystack
+    const verifyResponse = await paystackRequest(`/transaction/verify/${reference}`)
+
+    if (!verifyResponse.status || verifyResponse.data.status !== "success") {
+      return res.status(400).json({ success: false, message: "Card verification failed" })
+    }
+
+    // Get authorization data
+    const authData = verifyResponse.data.authorization
+    if (!authData || !authData.authorization_code) {
+      return res.status(400).json({ success: false, message: "No card authorization data found" })
+    }
+
+    // Get user
+    const user = await User.findById(req.user.id)
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" })
+    }
+
+    // Check if user already has a Paystack customer code
+    let customerCode = user.paystackCustomerCode
+
+    // If not, create a customer in Paystack
+    if (!customerCode) {
+      const customerData = {
+        email: verifyResponse.data.customer.email,
+        first_name: user.firstName,
+        last_name: user.lastName,
+        phone: user.phoneNumber,
+        metadata: {
+          userId: user._id.toString(),
+        },
+      }
+
+      const customerResponse = await paystackRequest("/customer", "POST", customerData)
+      customerCode = customerResponse.data.customer_code
+
+      // Save customer code to user
+      user.paystackCustomerCode = customerCode
+      await user.save()
+    }
+
+    // If this card is set as primary, update all other cards
+    if (isPrimary) {
+      await Card.updateMany({ userId: req.user.id }, { $set: { isPrimary: false } })
+    }
+
+    // Check if card already exists
+    const existingCard = await Card.findOne({
+      userId: req.user.id,
+      last4: authData.last4,
+      bin: authData.bin,
+      paystackAuthCode: authData.authorization_code,
+    })
+
+    if (existingCard) {
+      return res.status(400).json({ success: false, message: "This card is already saved to your account" })
+    }
+
+    // Create new card
+    const card = new Card({
+      userId: req.user.id,
+      last4: authData.last4,
+      cardType: authData.card_type,
+      expiryMonth: authData.exp_month,
+      expiryYear: authData.exp_year,
+      bin: authData.bin,
+      bank: authData.bank,
+      cardHolder: user.firstName + " " + user.lastName, // Use user's name as card holder
+      paystackAuthCode: authData.authorization_code,
+      paystackCustomerCode: customerCode,
+      isPrimary: isPrimary || false,
+    })
+
+    await card.save()
+
+    // Refund the charge
+    const refundData = {
+      transaction: verifyResponse.data.id,
+    }
+
+    await paystackRequest("/refund", "POST", refundData)
+
+    // Format card for response
+    const formattedCard = {
+      id: card._id,
+      card_number: `**** **** **** ${card.last4}`,
+      card_holder: card.cardHolder,
+      expiry_date: `${card.expiryMonth}/${card.expiryYear.slice(-2)}`,
+      card_type: card.cardType,
+      is_primary: card.isPrimary,
+      bank: card.bank,
+    }
+
+    res.json({ success: true, card: formattedCard })
+  } catch (err) {
+    console.error("Card verification error:", err.message)
+    res.status(500).json({ success: false, message: "Server error" })
+  }
+})
+
 // @route   POST api/payments/charge-card
 // @desc    Charge a saved card
 // @access  Private
