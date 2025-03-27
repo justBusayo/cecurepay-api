@@ -30,7 +30,7 @@ const UserSchema = new mongoose.Schema({
   },
   balance: {
     type: Number,
-    default: 1000, // Starting balance for testing
+    default: 0, // Starting balance for testing
   },
   accountNumber: {
     type: String,
