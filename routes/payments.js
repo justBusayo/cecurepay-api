@@ -34,6 +34,175 @@ const paystackRequest = async (endpoint, method = "GET", data = null) => {
   }
 }
 
+// @route   GET api/payments/banks
+// @desc    Get list of banks
+// @access  Public
+router.get("/banks", async (req, res) => {
+  try {
+    // Get banks from Paystack API
+    const response = await paystackRequest("/bank")
+
+    if (!response.status) {
+      return res.status(400).json({ success: false, message: "Failed to fetch banks" })
+    }
+
+    // Return the list of banks
+    res.json({
+      success: true,
+      data: response.data.map((bank) => ({
+        id: bank.id.toString(),
+        code: bank.code,
+        name: bank.name,
+        country: bank.country,
+        currency: bank.currency,
+      })),
+    })
+  } catch (err) {
+    console.error("Get banks error:", err.message)
+    res.status(500).json({ success: false, message: "Server error fetching banks" })
+  }
+})
+
+// @route   POST api/payments/verify-account
+// @desc    Verify bank account
+// @access  Private
+router.post("/verify-account", auth, async (req, res) => {
+  try {
+    const { account_number, bank_code } = req.body
+
+    if (!account_number || !bank_code) {
+      return res.status(400).json({
+        success: false,
+        message: "Account number and bank code are required",
+      })
+    }
+
+    // Verify account with Paystack API
+    const response = await paystackRequest(`/bank/resolve?account_number=${account_number}&bank_code=${bank_code}`)
+
+    if (!response.status) {
+      return res.status(400).json({
+        success: false,
+        message: "Failed to verify account",
+      })
+    }
+
+    // Return the account details
+    res.json({
+      success: true,
+      data: {
+        account_number: response.data.account_number,
+        account_name: response.data.account_name,
+      },
+    })
+  } catch (err) {
+    console.error("Verify account error:", err.message)
+    res.status(500).json({ success: false, message: "Server error verifying account" })
+  }
+})
+
+// @route   POST api/payments/withdraw
+// @desc    Process withdrawal
+// @access  Private
+router.post("/withdraw", auth, async (req, res) => {
+  try {
+    const { amount, bank_code, account_number, account_name, narration } = req.body
+
+    if (!amount || !bank_code || !account_number || !account_name) {
+      return res.status(400).json({
+        success: false,
+        message: "Amount, bank code, account number, and account name are required",
+      })
+    }
+
+    // Get user
+    const user = await User.findById(req.user.id)
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" })
+    }
+
+    // Check if user has enough balance
+    if (user.balance < amount) {
+      return res.status(400).json({
+        success: false,
+        message: "Insufficient balance",
+      })
+    }
+
+    // Create a transfer recipient
+    const recipientData = {
+      type: "nuban",
+      name: account_name,
+      account_number: account_number,
+      bank_code: bank_code,
+      currency: "NGN",
+    }
+
+    const recipientResponse = await paystackRequest("/transferrecipient", "POST", recipientData)
+
+    if (!recipientResponse.status) {
+      return res.status(400).json({
+        success: false,
+        message: "Failed to create transfer recipient",
+      })
+    }
+
+    // Create a transfer
+    const transferData = {
+      source: "balance",
+      amount: amount * 100, // Convert to kobo
+      recipient: recipientResponse.data.recipient_code,
+      reason: narration || "Withdrawal",
+    }
+
+    const transferResponse = await paystackRequest("/transfer", "POST", transferData)
+
+    if (!transferResponse.status) {
+      return res.status(400).json({
+        success: false,
+        message: "Failed to initiate transfer",
+      })
+    }
+
+    // Update user's balance
+    user.balance -= amount
+    await user.save()
+
+    // Create transaction record
+    const transaction = new Transaction({
+      userId: user._id,
+      transactionType: "withdrawal",
+      amount: amount,
+      fee: 0,
+      status: "pending",
+      purpose: narration || "Withdrawal",
+      reference: transferResponse.data.transfer_code,
+      recipientName: account_name,
+      recipientDetails: {
+        bankName: bank_code,
+        accountNumber: account_number,
+        accountName: account_name,
+      },
+    })
+
+    await transaction.save()
+
+    res.json({
+      success: true,
+      message: "Withdrawal initiated successfully",
+      reference: transferResponse.data.transfer_code,
+      transaction: {
+        id: transaction._id,
+        amount,
+        status: "pending",
+      },
+    })
+  } catch (err) {
+    console.error("Withdrawal error:", err.message)
+    res.status(500).json({ success: false, message: "Server error processing withdrawal" })
+  }
+})
+
 // @route   POST api/payments/initialize
 // @desc    Initialize a Paystack payment
 // @access  Private
