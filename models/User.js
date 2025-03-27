@@ -30,7 +30,7 @@ const UserSchema = new mongoose.Schema({
   },
   balance: {
     type: Number,
-    default: 0, // Starting balance for testing
+    default: 1000, // Starting balance for testing
   },
   accountNumber: {
     type: String,
@@ -53,6 +53,9 @@ const UserSchema = new mongoose.Schema({
     type: String,
   },
   paystackTransferRecipientCode: {
+    type: String,
+  },
+  businessName: {
     type: String,
   },
   createdAt: {

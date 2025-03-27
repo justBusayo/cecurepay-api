@@ -755,7 +755,11 @@ router.post("/create-subaccount", auth, async (req, res) => {
 
     // Save subaccount code to user
     user.paystackSubaccountCode = response.data.subaccount_code
-    await user.save()
+
+    // Make sure we're also saving any other relevant data:
+    if (response.data.business_name) {
+      user.businessName = response.data.business_name
+    }
 
     res.json({
       success: true,
@@ -830,6 +834,12 @@ router.post("/create-virtual-account", auth, async (req, res) => {
     // Save virtual account details to user
     user.paystackVirtualAccountNumber = response.data.account_number
     user.paystackVirtualBankName = response.data.bank.name
+
+    // Make sure we're also saving the customer code (this should already be there, but let's verify):
+    if (!user.paystackCustomerCode) {
+      user.paystackCustomerCode = customerCode
+    }
+
     await user.save()
 
     res.json({
@@ -896,6 +906,11 @@ router.post("/transfer", auth, async (req, res) => {
 
       // Save recipient code to user
       recipient.paystackTransferRecipientCode = recipientCode
+
+      // Make sure we're properly saving it:
+      if (!recipient.paystackTransferRecipientCode) {
+        recipient.paystackTransferRecipientCode = recipientCode
+      }
       await recipient.save()
     }
 
@@ -1028,5 +1043,146 @@ const handleReversedTransfer = async (data) => {
     console.error("Error handling reversed transfer:", error)
   }
 }
+
+// @route   POST api/payments/setup-paystack-profile
+// @desc    Set up all Paystack resources for a user
+// @access  Private
+router.post("/setup-paystack-profile", auth, async (req, res) => {
+  try {
+    // Get user
+    const user = await User.findById(req.user.id)
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found" })
+    }
+
+    const results = {
+      customer: false,
+      virtualAccount: false,
+      subaccount: false,
+      transferRecipient: false,
+    }
+
+    // 1. Create a customer if not exists
+    if (!user.paystackCustomerCode) {
+      try {
+        const customerData = {
+          email: user.email,
+          first_name: user.firstName,
+          last_name: user.lastName,
+          phone: user.phoneNumber,
+          metadata: {
+            userId: user._id.toString(),
+          },
+        }
+
+        const customerResponse = await paystackRequest("/customer", "POST", customerData)
+        user.paystackCustomerCode = customerResponse.data.customer_code
+        await user.save()
+        results.customer = true
+      } catch (error) {
+        console.error("Customer creation error:", error)
+        results.customer = false
+      }
+    } else {
+      results.customer = true
+    }
+
+    // 2. Create dedicated virtual account if not exists
+    if (!user.paystackVirtualAccountNumber && user.paystackCustomerCode) {
+      try {
+        const virtualAccountData = {
+          customer: user.paystackCustomerCode,
+          preferred_bank: "test-bank", // Replace with actual preferred bank
+        }
+
+        const response = await paystackRequest("/dedicated_account", "POST", virtualAccountData)
+
+        if (response.status) {
+          user.paystackVirtualAccountNumber = response.data.account_number
+          user.paystackVirtualBankName = response.data.bank.name
+          await user.save()
+          results.virtualAccount = true
+        }
+      } catch (error) {
+        console.error("Virtual account creation error:", error)
+        results.virtualAccount = false
+      }
+    } else if (user.paystackVirtualAccountNumber) {
+      results.virtualAccount = true
+    }
+
+    // 3. Create a transfer recipient if not exists
+    if (!user.paystackTransferRecipientCode && user.paystackVirtualAccountNumber) {
+      try {
+        const recipientData = {
+          type: "nuban",
+          name: `${user.firstName} ${user.lastName}`,
+          account_number: user.paystackVirtualAccountNumber,
+          bank_code: "044", // Access Bank code, replace with actual bank code
+          currency: "NGN",
+        }
+
+        const recipientResponse = await paystackRequest("/transferrecipient", "POST", recipientData)
+        user.paystackTransferRecipientCode = recipientResponse.data.recipient_code
+        await user.save()
+        results.transferRecipient = true
+      } catch (error) {
+        console.error("Transfer recipient creation error:", error)
+        results.transferRecipient = false
+      }
+    } else if (user.paystackTransferRecipientCode) {
+      results.transferRecipient = true
+    }
+
+    // 4. Create a subaccount if requested and not exists
+    if (!user.paystackSubaccountCode && req.body.createSubaccount) {
+      try {
+        const { businessName, settlementBank, accountNumber } = req.body
+
+        if (businessName && settlementBank && accountNumber) {
+          const subaccountData = {
+            business_name: businessName,
+            settlement_bank: settlementBank,
+            account_number: accountNumber,
+            percentage_charge: 0,
+            description: `Subaccount for ${user.firstName} ${user.lastName}`,
+          }
+
+          const response = await paystackRequest("/subaccount", "POST", subaccountData)
+
+          if (response.status) {
+            user.paystackSubaccountCode = response.data.subaccount_code
+            await user.save()
+            results.subaccount = true
+          }
+        }
+      } catch (error) {
+        console.error("Subaccount creation error:", error)
+        results.subaccount = false
+      }
+    } else if (user.paystackSubaccountCode) {
+      results.subaccount = true
+    }
+
+    // Return the updated user profile with Paystack details
+    res.json({
+      success: true,
+      message: "Paystack profile setup completed",
+      results,
+      paystackProfile: {
+        customerCode: user.paystackCustomerCode,
+        virtualAccount: {
+          accountNumber: user.paystackVirtualAccountNumber,
+          bankName: user.paystackVirtualBankName,
+        },
+        transferRecipientCode: user.paystackTransferRecipientCode,
+        subaccountCode: user.paystackSubaccountCode,
+      },
+    })
+  } catch (err) {
+    console.error("Paystack profile setup error:", err.message)
+    res.status(500).json({ success: false, message: "Server error setting up Paystack profile" })
+  }
+})
 
 module.exports = router
